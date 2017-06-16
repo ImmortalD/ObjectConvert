@@ -3,10 +3,15 @@ package com.immortal.util.objectutil;
 import com.immortal.util.objectutil.filed.compare.FiledCompare;
 import com.immortal.util.objectutil.filed.compare.SimpleFiledCompare;
 import com.immortal.util.objectutil.filed.converter.ValueConverter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
@@ -69,7 +74,7 @@ import java.util.Map;
  */
 public abstract class ObjectUtil {
 
-    // private static final Logger log = LoggerFactory.getLogger(ObjectUtil.class);
+    private static final Logger log = LoggerFactory.getLogger(ObjectUtil.class);
     /**
      * java基本类型对象的包装类型
      */
@@ -121,6 +126,9 @@ public abstract class ObjectUtil {
         }
         value.put(targetClass, valueConvert);
         valueConverts.put(srcClass, value);
+        if (log.isDebugEnabled()) {
+            log.debug("add ValueConverter " + srcClass.getName() + " -> " + targetClass.getName());
+        }
     }
 
     /**
@@ -129,6 +137,12 @@ public abstract class ObjectUtil {
      * @param valueConvert ValueConverter
      */
     public static void addValueConvert(ValueConverter<?, ?> valueConvert) {
+        if (valueConvert.getClass().getName().contains("$$Lambda$1")) {
+            log.error("this ValueConverter implements by Lamdba,should " +
+                    "invoke addValueConvert(ValueConverter<?, ?> valueConvert, Class<?> srcClass, Class<?> targetClass) " +
+                    "add ValueConverter");
+            return;
+        }
         Type genType = valueConvert.getClass().getGenericInterfaces()[0];
         Type[] params = ((ParameterizedType) genType).getActualTypeArguments();
         if (params.length == 2) {
@@ -184,11 +198,18 @@ public abstract class ObjectUtil {
             }
 
             // 如果上面没有匹配,则在map映射中找
-            if (invokeTargetObjMethod == null && map != null)
-                invokeTargetObjMethod = getInvokeTargetMethod(map.get(srcFiledName), targetObjSetMethods);
+            String newSrcFiledName = null;
+            if (invokeTargetObjMethod == null && map != null && (newSrcFiledName = map.get(srcFiledName)) != null) {
+                if (log.isDebugEnabled()) {
+                    log.debug("Custom field convert [" + srcFiledName + "] -> [" + map.get(srcFiledName) + "]");
+                }
+                invokeTargetObjMethod = getInvokeTargetMethod(newSrcFiledName, targetObjSetMethods);
+            }
 
             // copy值
-            copyValue(srcObjGetMethod, invokeTargetObjMethod, srcObj, targetObj);
+            if (invokeTargetObjMethod != null) {
+                copyValue(srcObjGetMethod, invokeTargetObjMethod, srcObj, targetObj);
+            }
         }
         return targetObj;
     }
@@ -314,6 +335,34 @@ public abstract class ObjectUtil {
     }
 
     // -------------------------------------------
+    //             一个对象转到map
+    // -------------------------------------------
+
+    /**
+     * 把一个对象转换到map,map的key是对象的属性,map的value是对象的值
+     *
+     * @param o   转换的对象
+     * @param <T>
+     * @return
+     * @throws NullPointerException
+     */
+    public static <T> Map<String, Object> object2Map(T o) {
+        Field[] fields = o.getClass().getDeclaredFields();
+        Map<String, Object> map = new HashMap<String, Object>(fields.length);
+
+        for (Field field : fields) {
+            field.setAccessible(true);
+            try {
+                map.put(field.getName(), field.get(o));
+            } catch (IllegalAccessException e) {
+                e.printStackTrace();
+            }
+        }
+
+        return map;
+    }
+
+    // -------------------------------------------
     //             一个list转换到另一个list
     // -------------------------------------------
 
@@ -435,11 +484,17 @@ public abstract class ObjectUtil {
         }
 
         Map<Class<?>, ValueConverter<?, ?>> targetValueConverts = null;
-        if (valueConverts == null || (targetValueConverts = valueConverts.get(newSrcClass)) == null) {
+        ValueConverter<?, ?> valueConverter = null;
+        if (valueConverts == null
+                || (targetValueConverts = valueConverts.get(newSrcClass)) == null
+                || (valueConverter = targetValueConverts.get(newTargetClass)) == null) {
+
+            log.debug("[" + srcClass.getName() + "] -> [" + targetClass.getName() + "] isn't find ValueConverter");
             return null;
         }
 
-        return (ValueConverter<Object, Object>) (targetValueConverts.get(newTargetClass));
+        log.debug("[" + srcClass.getName() + "] -> [" + targetClass.getName() + "] find ValueConverter:" + valueConverter.getClass().getName());
+        return (ValueConverter<Object, Object>) valueConverter;
     }
 
     /**
@@ -451,15 +506,15 @@ public abstract class ObjectUtil {
      * @param targetObj       目标对象
      */
     private static void copyValue(Method srcObjMethod, Method targetObjMethod, Object srcObj, Object targetObj) {
-        srcObjMethod.setAccessible(true);
+        setExecutableAccessible(srcObjMethod);
         Object obj = null;
         try {
             obj = srcObjMethod.invoke(srcObj);
         } catch (IllegalAccessException e) {
-            //log.warn(e.getMessage());
+            log.error("get source object value fail", e.getMessage());
             return;
         } catch (InvocationTargetException e) {
-            // log.warn(e.getMessage());
+            log.error("get source object value fail", e.getMessage());
             return;
         }
         copyValue(targetObjMethod, obj, targetObj);
@@ -476,7 +531,7 @@ public abstract class ObjectUtil {
         if (targetObjMethod == null) {
             return;
         }
-        targetObjMethod.setAccessible(true);
+        setExecutableAccessible(targetObjMethod);
         // 根据原来get方法的返回值类型和set方法的参数类型获取转换器
         ValueConverter<Object, Object> valueConvert = getValueConvert(value.getClass(), targetObjMethod.getParameterTypes()[0]);
 
@@ -487,13 +542,13 @@ public abstract class ObjectUtil {
 
         // 给目标对象的目标字段复制
         try {
+            if (log.isDebugEnabled()) {
+                log.debug("[" + targetObjMethod.getDeclaringClass().getName() + "."
+                        + getFiledNameBySetOrGetMethod(targetObjMethod) + "] set value [" + value + "]");
+            }
             targetObjMethod.invoke(targetObj, value);
-        } catch (IllegalAccessException e) {
-            //  log.warn(e.getMessage());
-        } catch (InvocationTargetException e) {
-            // log.warn(e.getMessage());
         } catch (Exception e) {
-            // log.warn(e.getMessage());
+            log.warn(e.getMessage());
         }
     }
 
@@ -517,6 +572,9 @@ public abstract class ObjectUtil {
     private static boolean isInvokeTargetMethod(String srcFiledName, String targetFiledName) {
         for (FiledCompare filedCompare : filedCompares) {
             if (filedCompare.compare(srcFiledName, targetFiledName)) {
+                if (log.isDebugEnabled()) {
+                    log.debug("[" + srcFiledName + "] -> [" + targetFiledName + "],by FiledCompare [" + filedCompare.getClass().getName() + "]");
+                }
                 return true;
             }
         }
@@ -535,10 +593,15 @@ public abstract class ObjectUtil {
             if (targetObjMethod.getName().startsWith("set")) { // targetObj的set方法
                 String targetFiledName = getFiledNameBySetOrGetMethod(targetObjMethod);
                 if (isInvokeTargetMethod(srcFiledName, targetFiledName)) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("source filed [" + srcFiledName + "] find target method [" +
+                                targetObjMethod.getDeclaringClass().getName() + "." + targetObjMethod.getName() + "]");
+                    }
                     return targetObjMethod;
                 }
             }
         } // end for
+        log.debug("source filed [" + srcFiledName + "] not find target method");
         return null;
     }
 
@@ -581,17 +644,12 @@ public abstract class ObjectUtil {
 
         Constructor<T> constructor = null;
         try {
-            targetObj = targetClassType.newInstance();
-        } catch (Exception e) {
-            try {
-                constructor = targetClassType.getConstructor();
-                constructor.setAccessible(true);
-                targetObj = constructor.newInstance();
-            } catch (Exception e1) {
-                throw new RuntimeException(e1);
-            }
+            constructor = targetClassType.getConstructor();
+            setExecutableAccessible(constructor);
+            targetObj = constructor.newInstance();
+        } catch (Exception e1) {
+            throw new RuntimeException(e1);
         }
-
         return targetObj;
     }
 
@@ -612,7 +670,11 @@ public abstract class ObjectUtil {
         }
         return map;
     }
+
+    private static void setExecutableAccessible(Executable executable) {
+        if (!Modifier.isPublic(executable.getDeclaringClass().getModifiers())) {
+            executable.setAccessible(true);
+        }
+    }
+
 }
-
-
-

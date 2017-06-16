@@ -13,11 +13,32 @@ import java.util.Map;
  * @version V1.0
  * @since 2016-3-30
  */
+interface X {
+
+}
+
+class XXP implements X {
+
+}
+
+class XX extends XXP {
+
+}
+
 class Src {
     private String name;
     private int age;
     private int score;
     private Date time;
+    private XX xx = new XX();
+
+    public XX getXx() {
+        return xx;
+    }
+
+    public void setXx(XX xx) {
+        this.xx = xx;
+    }
 
     public Src(String name, int age, int score, Date time) {
         this.name = name;
@@ -75,6 +96,15 @@ class Target {
     private int age;
     private String value;
     private String time;
+    private X xx = new XX();
+
+    public X getXx() {
+        return xx;
+    }
+
+    public void setXx(X xx) {
+        this.xx = xx;
+    }
 
     public Target() {
     }
@@ -130,10 +160,20 @@ class Target {
     }
 }
 
+
+class Int2String implements ValueConverter<Integer, String> {
+    @Override
+    public String convert(Integer integer) {
+        return String.valueOf(integer);
+    }
+}
+
+
 public class TestObjectUtil {
 
     public static void main(String[] args) {
-
+        XX x = new XX();
+        System.out.println(x);
         Src src = new Src("src", 1, 2, new Date());
         Target target = new Target();
         target.setTime("----------");
@@ -149,23 +189,25 @@ public class TestObjectUtil {
         // 上面测试的转换time的类型不同,转换后taeget的time依然是null,
 
         // int -> String的值转换
-        ObjectUtil.addValueConvert(new ValueConverter<Integer, String>() {
+       /* ObjectUtil.addValueConvert(new ValueConverter<Integer, String>() {
             @Override
             public String convert(Integer integer) {
                 return String.valueOf(integer);
             }
         });
-
+*/
+        ObjectUtil.addValueConvert(new Int2String());
         // Date -> String的值转换  lamdba必须调用3个参数的addValueConvert来添加
-        ObjectUtil.addValueConvert(date -> new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(date),
-                Date.class, String.class);
+        ObjectUtil.addValueConvert(date -> new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").
+                        format(date)
+                , Date.class, String.class
+        );
 
 
-        target = ObjectUtil.object2Object(src, target, map);
+        target = ObjectUtil.object2Object(src, Target.class, map);
         System.out.println("自定义字段的转换");
         System.out.println(src.toString());
         System.out.println(target.toString());
-
     }
 
 }
