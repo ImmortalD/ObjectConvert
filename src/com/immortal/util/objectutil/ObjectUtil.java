@@ -351,7 +351,9 @@ public abstract class ObjectUtil {
         Map<String, Object> map = new HashMap<String, Object>(fields.length);
 
         for (Field field : fields) {
-            field.setAccessible(true);
+            if (!field.isAccessible()) {
+                field.setAccessible(true);
+            }
             try {
                 map.put(field.getName(), field.get(o));
             } catch (IllegalAccessException e) {
