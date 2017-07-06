@@ -7,14 +7,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Executable;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -88,8 +87,10 @@ public abstract class ObjectUtil {
     /**
      * 值转换
      */
-    private static Map<Class<?>/*原类型,转换后的类型*/, Map<Class<?>, ValueConverter<?, ?>/*对应的转换对象*/>> valueConverts =
+    private static Map<Class<?>/*原类型*/, Map<Class<?>/*转换后的类型*/, ValueConverter<?, ?>/*对应的转换对象*/>> valueConverts =
             new HashMap<Class<?>, Map<Class<?>, ValueConverter<?, ?>>>(10);
+
+    private static final String OBJECT_CLASS_NAME = "java.lang.Object";
 
     static {
         javaTypeMap.put(boolean.class, Boolean.class);
@@ -139,8 +140,8 @@ public abstract class ObjectUtil {
     public static void addValueConvert(ValueConverter<?, ?> valueConvert) {
         if (valueConvert.getClass().getName().contains("$$Lambda$1")) {
             log.error("this ValueConverter implements by Lamdba,should " +
-                    "invoke addValueConvert(ValueConverter<?, ?> valueConvert, Class<?> srcClass, Class<?> targetClass) " +
-                    "add ValueConverter");
+                              "invoke addValueConvert(ValueConverter<?, ?> valueConvert, Class<?> srcClass, Class<?> targetClass) " +
+                              "add ValueConverter");
             return;
         }
         Type genType = valueConvert.getClass().getGenericInterfaces()[0];
@@ -178,34 +179,17 @@ public abstract class ObjectUtil {
         if (srcObj == null || targetObj == null)
             return null;
 
-        Method[] targetObjSetMethods = getMethodsStartWith(targetObj.getClass(), "set");
-        Method[] srcObjGetMethods = getMethodsStartWith(srcObj.getClass(), "get");
+        List<Method> targetObjSetMethods = getMethods(targetObj.getClass(), "set.*");
+        List<Method> srcObjGetMethods = getMethods(srcObj.getClass(), "get.*");
 
         if (targetObjSetMethods == null || srcObjGetMethods == null)
             return targetObj;
 
         for (Method srcObjGetMethod : srcObjGetMethods) {
-            String srcFiledName = getFiledNameBySetOrGetMethod(srcObjGetMethod);
-            Method invokeTargetObjMethod = getInvokeTargetMethod(srcFiledName, targetObjSetMethods);
-
-            if (skipSrcFiled != null && skipSrcFiled.contains(srcFiledName)) {
-                continue;
-            }
-
-            if (skipTargetFiled != null
-                    && skipTargetFiled.contains(getFiledNameBySetOrGetMethod(invokeTargetObjMethod))) {
-                continue;
-            }
-
-            // 如果上面没有匹配,则在map映射中找
-            String newSrcFiledName = null;
-            if (invokeTargetObjMethod == null && map != null && (newSrcFiledName = map.get(srcFiledName)) != null) {
-                if (log.isDebugEnabled()) {
-                    log.debug("Custom field convert [" + srcFiledName + "] -> [" + map.get(srcFiledName) + "]");
-                }
-                invokeTargetObjMethod = getInvokeTargetMethod(newSrcFiledName, targetObjSetMethods);
-            }
-
+            Method invokeTargetObjMethod = getInvokeTargetMethod(targetObjSetMethods,
+                                                                 getFiledNameBySetOrGetMethod(srcObjGetMethod),
+                                                                 "set.*",
+                                                                 map, skipSrcFiled, skipTargetFiled);
             // copy值
             if (invokeTargetObjMethod != null) {
                 copyValue(srcObjGetMethod, invokeTargetObjMethod, srcObj, targetObj);
@@ -297,10 +281,53 @@ public abstract class ObjectUtil {
         return object2Object(srcObj, newObject(targetClassType), nameParis2Map(namePairs));
     }
 
-
     // -------------------------------------------
     //             map转到一个对象
     // -------------------------------------------
+
+    /**
+     * 把map转换成对象
+     *
+     * @param map             要转换的map
+     * @param targetObj       转换的目标对象
+     * @param fieldMap        把map的字段映射到目标对象上,实现对特殊字段的处理
+     * @param skipMapKey      要转换的map中跳过的字段
+     * @param skipTargetFiled 目标对象跳过的字段
+     * @param <T>
+     * @return
+     */
+    public static <T> T map2Object(final Map<String, Object> map, final T targetObj, final Map<String, String> fieldMap,
+                                   List<String> skipMapKey, List<String> skipTargetFiled) {
+        if (map == null || map.size() == 0 || targetObj == null)
+            return targetObj;
+
+        List<Method> targetObjSetMethods = getMethods(targetObj.getClass(), "set.*");
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+
+            Method invokeTargetObjMethod = getInvokeTargetMethod(targetObjSetMethods, entry.getKey(), "set.*",
+                                                                 fieldMap, skipMapKey, skipTargetFiled);
+
+            Object value = entry.getValue();
+            copyValue(invokeTargetObjMethod, targetObj, value, value == null ? Object.class : value.getClass());
+        }
+        return targetObj;
+    }
+
+    /**
+     * 把map转换成对象
+     *
+     * @param map             要转换的map
+     * @param targetClassType 转换的目标对象类型
+     * @param fieldMap        把map的字段映射到目标对象上,实现对特殊字段的处理
+     * @param skipMapKey      要转换的map中跳过的字段
+     * @param skipTargetFiled 目标对象跳过的字段
+     * @param <T>
+     * @return
+     */
+    public static <T> T map2Object(final Map<String, Object> map, final Class<T> targetClassType, final Map<String, String> fieldMap,
+                                   List<String> skipMapKey, List<String> skipTargetFiled) {
+        return map2Object(map, newObject(targetClassType), fieldMap, skipMapKey, skipTargetFiled);
+    }
 
     /**
      * 把map转换成对象
@@ -311,15 +338,7 @@ public abstract class ObjectUtil {
      * @return 转换后的目标对象
      */
     public static <T> T map2Object(final Map<String, Object> map, final T targetObj) {
-        if (map == null || map.size() == 0 || targetObj == null)
-            return targetObj;
-
-        Method[] targetObjSetMethods = getMethodsStartWith(targetObj.getClass(), "set");
-        for (Map.Entry<String, Object> entry : map.entrySet()) {
-            Method targetObjMethod = getInvokeTargetMethod(entry.getKey(), targetObjSetMethods);
-            copyValue(targetObjMethod, entry.getValue(), targetObj);
-        }
-        return targetObj;
+        return map2Object(map, targetObj, (Map<String, String>) null, (List<String>) null, (List<String>) null);
     }
 
     /**
@@ -341,23 +360,36 @@ public abstract class ObjectUtil {
     /**
      * 把一个对象转换到map,map的key是对象的属性,map的value是对象的值
      *
-     * @param o   转换的对象
+     * @param obj 转换的对象
      * @param <T>
      * @return
      * @throws NullPointerException
      */
-    public static <T> Map<String, Object> object2Map(T o) {
-        Field[] fields = o.getClass().getDeclaredFields();
-        Map<String, Object> map = new HashMap<String, Object>(fields.length);
+    public static <T> Map<String, Object> object2Map(T obj) {
 
-        for (Field field : fields) {
-            if (!field.isAccessible()) {
-                field.setAccessible(true);
-            }
-            try {
-                map.put(field.getName(), field.get(o));
-            } catch (IllegalAccessException e) {
-                e.printStackTrace();
+        Map<String, String> fieldNames = new HashMap<String, String>();
+        Class cls = obj.getClass();
+        while (!OBJECT_CLASS_NAME.equals(cls.getName())) {
+            Field[] fields = cls.getDeclaredFields();
+            for (Field field : fields) {
+                fieldNames.put(field.getName().toLowerCase(), field.getName());
+            } // end for
+            cls = cls.getSuperclass();
+        }
+
+        Map<String, Object> map = new HashMap<String, Object>();
+        List<Method> methods = getMethods(obj.getClass(), "get.*");
+        for (Method method : methods) {
+            String fieldName = getFiledNameBySetOrGetMethod(method).toLowerCase();
+            if (fieldNames.containsKey(fieldName)) {
+                try {
+                    setMethodAccessible(method);
+                    map.put(fieldNames.get(fieldName), method.invoke(obj));
+                } catch (InvocationTargetException e) {
+                    log.error("get value error", e);
+                } catch (Exception e) {
+                    log.error("get value error", e);
+                }
             }
         }
 
@@ -508,34 +540,35 @@ public abstract class ObjectUtil {
      * @param targetObj       目标对象
      */
     private static void copyValue(Method srcObjMethod, Method targetObjMethod, Object srcObj, Object targetObj) {
-        setExecutableAccessible(srcObjMethod);
+        setMethodAccessible(srcObjMethod);
         Object obj = null;
         try {
             obj = srcObjMethod.invoke(srcObj);
         } catch (IllegalAccessException e) {
-            log.error("get source object value fail", e.getMessage());
+            log.error("get source object value fail", e);
             return;
         } catch (InvocationTargetException e) {
-            log.error("get source object value fail", e.getMessage());
+            log.error("get source object value fail", e);
             return;
         }
-        copyValue(targetObjMethod, obj, targetObj);
+        copyValue(targetObjMethod, targetObj, obj, srcObjMethod.getReturnType());
     }
 
     /**
      * 将调用targetObjMethod方法把value设置到targetObj对象中
      *
      * @param targetObjMethod 要调用的set方法
-     * @param value           值
      * @param targetObj       目标对象
+     * @param value           值
+     * @param valueClass      值得类型
      */
-    private static void copyValue(Method targetObjMethod, Object value, Object targetObj) {
+    private static void copyValue(Method targetObjMethod, Object targetObj, Object value, Class<?> valueClass) {
         if (targetObjMethod == null) {
             return;
         }
-        setExecutableAccessible(targetObjMethod);
+        setMethodAccessible(targetObjMethod);
         // 根据原来get方法的返回值类型和set方法的参数类型获取转换器
-        ValueConverter<Object, Object> valueConvert = getValueConvert(value.getClass(), targetObjMethod.getParameterTypes()[0]);
+        ValueConverter<Object, Object> valueConvert = getValueConvert(valueClass, targetObjMethod.getParameterTypes()[0]);
 
         // 转换值
         if (valueConvert != null) {
@@ -546,7 +579,7 @@ public abstract class ObjectUtil {
         try {
             if (log.isDebugEnabled()) {
                 log.debug("[" + targetObjMethod.getDeclaringClass().getName() + "."
-                        + getFiledNameBySetOrGetMethod(targetObjMethod) + "] set value [" + value + "]");
+                                  + getFiledNameBySetOrGetMethod(targetObjMethod) + "] set value [" + value + "]");
             }
             targetObjMethod.invoke(targetObj, value);
         } catch (Exception e) {
@@ -565,7 +598,7 @@ public abstract class ObjectUtil {
     }
 
     /**
-     * 比较这个两个字段是否一致,只要FiledCompare的compare方法返回true,就认为这2个字段一致,进行转换
+     * 比较这个两个字段是否一致,只要FiledCompare的compare方法返回true,就认为这两个字段一致,进行转换
      *
      * @param srcFiledName    原字段名称
      * @param targetFiledName 目标字段名称
@@ -584,20 +617,21 @@ public abstract class ObjectUtil {
     }
 
     /**
-     * 根据原字段名称获取目标对象的set方法
+     * 根据原字段名称获取目标对象的方法
      *
-     * @param srcFiledName     原字段名称
-     * @param targetObjMethods 目标对象的set方法
-     * @return 返回对象set方法
+     * @param methods      目标对象的方法
+     * @param srcFiledName 原字段名称
+     * @param regex        匹配的方法
+     * @return 返回第一个匹配regex的方法
      */
-    private static Method getInvokeTargetMethod(String srcFiledName, Method[] targetObjMethods) {
-        for (Method targetObjMethod : targetObjMethods) {
-            if (targetObjMethod.getName().startsWith("set")) { // targetObj的set方法
+    private static Method getInvokeTargetMethod(List<Method> methods, String srcFiledName, String regex) {
+        for (Method targetObjMethod : methods) {
+            if (targetObjMethod.getName().matches(regex)) {
                 String targetFiledName = getFiledNameBySetOrGetMethod(targetObjMethod);
                 if (isInvokeTargetMethod(srcFiledName, targetFiledName)) {
                     if (log.isDebugEnabled()) {
                         log.debug("source filed [" + srcFiledName + "] find target method [" +
-                                targetObjMethod.getDeclaringClass().getName() + "." + targetObjMethod.getName() + "]");
+                                          targetObjMethod.getDeclaringClass().getName() + "." + targetObjMethod.getName() + "]");
                     }
                     return targetObjMethod;
                 }
@@ -608,27 +642,65 @@ public abstract class ObjectUtil {
     }
 
     /**
-     * 获取class文件中以特定字符串开头的方法
+     * 根据源字段找对应的方法
+     *
+     * @param methods         要寻找的方法
+     * @param srcFiledName    源字段
+     * @param fieldMap        自定义字段对应关系
+     * @param regex           匹配的方法
+     * @param skipSrcFiled    忽略源对象的字段
+     * @param skipTargetFiled 忽略目标对象的字段
+     * @return 返回第一个匹配regex的方法
+     */
+    private static Method getInvokeTargetMethod(List<Method> methods, String srcFiledName,
+                                                String regex, Map<String, String> fieldMap,
+                                                List<String> skipSrcFiled, List<String> skipTargetFiled) {
+        if (skipSrcFiled != null && skipSrcFiled.contains(srcFiledName)) {
+            return null;
+        }
+
+        Method invokeTargetObjMethod = getInvokeTargetMethod(methods, srcFiledName, regex);
+        if (skipTargetFiled != null
+                && skipTargetFiled.contains(getFiledNameBySetOrGetMethod(invokeTargetObjMethod))) {
+            return null;
+        }
+
+        // 如果上面没有匹配,则在map映射中找
+        String newSrcFiledName = null;
+        if (invokeTargetObjMethod == null && fieldMap != null && (newSrcFiledName = fieldMap.get(srcFiledName)) != null) {
+            if (log.isDebugEnabled()) {
+                log.debug("Custom field convert [" + srcFiledName + "] -> [" + fieldMap.get(srcFiledName) + "]");
+            }
+            invokeTargetObjMethod = getInvokeTargetMethod(methods, newSrcFiledName, regex);
+        }
+
+        return invokeTargetObjMethod;
+    }
+
+    /**
+     * 获取class文件中以特定的方法
      *
      * @param classType 类的class对象
-     * @param startStr  开始的字符串
-     * @return 返回查找方法的数组
+     * @param regex     匹配的方法名,null 或"" 和.*效果一样
+     * @return 返回查找方法
      */
-    private static Method[] getMethodsStartWith(Class<?> classType, String startStr) {
-        Method[] methods = classType.getDeclaredMethods();
-        List<Method> methodList = new ArrayList<Method>();
+    private static List<Method> getMethods(Class<?> classType, String regex) {
+        List<Method> methods = new ArrayList<Method>();
+        Class cls = classType;
 
-        if (methods != null)
-            for (Method method : methods) {
-                if (method.getName().startsWith(startStr)) {
-                    methodList.add(method);
-                }
-            }
-
-        Method[] resMethods = new Method[methodList.size()];
-        for (int i = 0; i < methodList.size(); i++) {
-            resMethods[i] = methodList.get(i);
+        while (!OBJECT_CLASS_NAME.equals(cls.getName())) {
+            methods.addAll(Arrays.asList(cls.getDeclaredMethods()));
+            cls = cls.getSuperclass();
         }
+
+        List<Method> resMethods = new ArrayList<Method>();
+
+        for (Method method : methods) {
+            if (regex == null || "".equals(regex) || method.getName().matches(regex)) {
+                resMethods.add(method);
+            }
+        }
+
         return resMethods;
     }
 
@@ -647,7 +719,7 @@ public abstract class ObjectUtil {
         Constructor<T> constructor = null;
         try {
             constructor = targetClassType.getConstructor();
-            setExecutableAccessible(constructor);
+            constructor.setAccessible(true);
             targetObj = constructor.newInstance();
         } catch (Exception e1) {
             throw new RuntimeException(e1);
@@ -656,8 +728,7 @@ public abstract class ObjectUtil {
     }
 
     /**
-     * 把转换成Map对象
-     * List<NamePair>
+     * 把List<NamePair>转换成Map对象
      *
      * @param namePairs 要转换的List<NamePair>对象
      * @return 返回转换后的Map
@@ -673,10 +744,13 @@ public abstract class ObjectUtil {
         return map;
     }
 
-    private static void setExecutableAccessible(Executable executable) {
-        if (!Modifier.isPublic(executable.getDeclaringClass().getModifiers())) {
-            executable.setAccessible(true);
-        }
+    /**
+     * 设置一个Java方法的可访问性
+     *
+     * @param method Java方法
+     */
+    private static void setMethodAccessible(Method method) {
+        method.setAccessible(true);
     }
 
 }
